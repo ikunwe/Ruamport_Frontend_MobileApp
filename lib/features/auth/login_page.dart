@@ -12,7 +12,7 @@ class LoginPage extends StatefulWidget {
   State<LoginPage> createState() => _LoginPageState();
 }
 
-void BacktoHome(BuildContext context) {
+void backtoHome(BuildContext context) {
   Navigator.of(context)
       .push(MaterialPageRoute<void>(builder: (_) => const HomePage()));
 }
@@ -33,7 +33,7 @@ class _LoginPageState extends State<LoginPage> {
                 Align(
                   alignment: Alignment.centerLeft,
                   child: IconButton(
-                    onPressed: () => BacktoHome(context),
+                    onPressed: () => backtoHome(context),
                     icon: Icon(Icons.arrow_back),
                   ),
                 ),
