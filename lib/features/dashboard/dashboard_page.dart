@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 
 import '../../core/theme/app_colors.dart';
 import '../../shared/widgets/brand.dart';
@@ -10,6 +11,7 @@ import 'widgets/allocation_legend.dart';
 import 'widgets/holding_row.dart';
 import 'charts/portfolio_chart.dart';
 import 'charts/allocation_chart.dart';
+
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -44,10 +46,19 @@ class _DashboardPageState extends State<DashboardPage> {
         ),
         NavigationDestination(
           icon: Icon(Icons.work_outline),
+          selectedIcon: Icon(Icons.work, color: lime),
           label: 'Portfolio',
         ),
-        NavigationDestination(icon: Icon(Icons.insights), label: 'Analytics'),
-        NavigationDestination(icon: Icon(Icons.swap_horiz), label: 'History'),
+        NavigationDestination(
+          icon: Icon(Icons.insights), 
+          selectedIcon: Icon(Icons.insights, color: lime),
+          label: 'Analytics'
+        ),
+        NavigationDestination(
+          icon: Icon(Icons.swap_horiz), 
+          selectedIcon: Icon(Icons.swap_horiz, color: lime),
+          label: 'History'
+        ),
       ],
     ),
     body: SafeArea(
