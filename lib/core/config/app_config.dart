@@ -20,4 +20,12 @@ class AppConfig {
   static String get authRedirect => kIsWeb
       ? '${Uri.base.origin}/auth/callback'
       : 'io.ruamport.mobile://auth/callback';
+
+  static String get healthUrl =>
+      const String.fromEnvironment(
+        'BACKEND_HEALTH_URL',
+        defaultValue: '',
+      ).isNotEmpty
+      ? const String.fromEnvironment('BACKEND_HEALTH_URL')
+      : '${apiUrl.replaceFirst(RegExp(r'/$'), '')}/health';
 }

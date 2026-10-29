@@ -4,6 +4,14 @@ import 'package:flutter/foundation.dart';
 import '../import/import_api.dart';
 import '../import/import_models.dart';
 import 'portfolio_data.dart';
+import '../../core/network/backend_cancellation.dart';
+
+class _PendingRead {
+  final cancel = BackendCancellation();
+  late final Future<Map<String, dynamic>> future;
+  int users = 0;
+  bool done = false;
+}
 
 class PortfolioStore extends ChangeNotifier {
   PortfolioStore(this.api);
@@ -15,7 +23,7 @@ class PortfolioStore extends ChangeNotifier {
   Timer? _timer;
   DateTime? _due;
   final _cache = <String, (DateTime, Map<String, dynamic>)>{};
-  final _pending = <String, Future<Map<String, dynamic>>>{};
+  final _pending = <String, _PendingRead>{};
   int _revision = 0;
   int get revision => _revision;
   String? _financialSignature;
@@ -90,6 +98,9 @@ class PortfolioStore extends ChangeNotifier {
         _financialSignature = signature;
         _revision++;
         _cache.clear();
+        for (final read in _pending.values.toList()) {
+          read.cancel.cancel();
+        }
         _pending.clear();
       }
       // ขอ Backend เมื่อ snapshot ราคา/โลโก้หมดอายุ ไม่เรียก Finnhub จาก Flutter
@@ -115,6 +126,8 @@ class PortfolioStore extends ChangeNotifier {
         delay < const Duration(minutes: 1) ? const Duration(minutes: 1) : delay,
       );
     } catch (failure) {
+      // A failed connection waits for the user's retry, not an overdue auto-refresh loop.
+      _due = null;
       if (!_disposed) {
         error = failure is ImportFailure
             ? failure.message
@@ -132,43 +145,77 @@ class PortfolioStore extends ChangeNotifier {
     }
   }
 
-  Future<Map<String, dynamic>> request(String path, {bool force = false}) {
+  Future<Map<String, dynamic>> request(
+    String path, {
+    bool force = false,
+    BackendCancellation? cancel,
+  }) async {
+    cancel?.check();
     final cached = _cache[path];
     if (!force && cached != null && cached.$1.isAfter(DateTime.now())) {
-      return Future.value(cached.$2);
+      return cached.$2;
     }
-    if (_pending[path] != null) return _pending[path]!;
-    final revision = _revision;
-    late final Future<Map<String, dynamic>> future;
-    future = api
-        .jsonRequest(path, timeout: const Duration(seconds: 180))
-        .then((value) {
-          if (_disposed || revision != _revision) {
-            throw const ImportFailure('ACCOUNT_CHANGED');
-          }
-          final expires = DateTime.tryParse(
-            textValue(objectMap(value['cache'])['expiresAt']) ?? '',
-          );
-          _cache[path] = (
-            expires != null && expires.isAfter(DateTime.now())
-                ? expires
-                : DateTime.now().add(const Duration(minutes: 5)),
-            value,
-          );
-          return value;
-        })
-        .whenComplete(() {
-          if (identical(_pending[path], future)) _pending.remove(path);
-        });
-    _pending[path] = future;
-    return future;
+    var flight = _pending[path];
+    if (flight == null) {
+      flight = _PendingRead();
+      final current = flight;
+      final revision = _revision;
+      late final Future<Map<String, dynamic>> future;
+      future = api
+          .jsonRequest(
+            path,
+            timeout: const Duration(seconds: 180),
+            cancel: current.cancel,
+          )
+          .then((value) {
+            if (_disposed ||
+                revision != _revision ||
+                current.cancel.cancelled) {
+              throw const ImportFailure('ACCOUNT_CHANGED');
+            }
+            final expires = DateTime.tryParse(
+              textValue(objectMap(value['cache'])['expiresAt']) ?? '',
+            );
+            _cache[path] = (
+              expires != null && expires.isAfter(DateTime.now())
+                  ? expires
+                  : DateTime.now().add(const Duration(minutes: 5)),
+              value,
+            );
+            return value;
+          })
+          .whenComplete(() {
+            current.done = true;
+            if (identical(_pending[path], current)) _pending.remove(path);
+          });
+      current.future = future;
+      _pending[path] = current;
+    }
+    flight.users++;
+    try {
+      return await (cancel == null
+          ? flight.future
+          : cancel.wait(flight.future));
+    } finally {
+      flight.users--;
+      if (flight.users == 0 && !flight.done) {
+        flight.cancel.cancel();
+        if (identical(_pending[path], flight)) _pending.remove(path);
+      }
+    }
   }
 
-  Future<List<Map<String, dynamic>>> pages(String path) async {
+  Future<List<Map<String, dynamic>>> pages(
+    String path, {
+    BackendCancellation? cancel,
+  }) async {
     final rows = <String, Map<String, dynamic>>{};
     int offset = 0;
     while (true) {
-      final page = await request('$path?offset=$offset&limit=100');
+      final page = await request(
+        '$path?offset=$offset&limit=100',
+        cancel: cancel,
+      );
       if (page['items'] is! List) throw const ImportFailure('INVALID_RESPONSE');
       for (final row in objectList(page['items'])) {
         final id = textValue(row['id']);
@@ -183,10 +230,13 @@ class PortfolioStore extends ChangeNotifier {
     }
   }
 
-  Future<List<Map<String, dynamic>>> transactions(Holding holding) async {
+  Future<List<Map<String, dynamic>>> transactions(
+    Holding holding, {
+    BackendCancellation? cancel,
+  }) async {
     final result = await Future.wait([
-      pages('/trades/documents'),
-      pages('/trades/transactions'),
+      pages('/trades/documents', cancel: cancel),
+      pages('/trades/transactions', cancel: cancel),
     ]);
     final docs = {
       for (final doc in result[0].where((doc) => doc['status'] == 'IMPORTED'))
@@ -221,6 +271,9 @@ class PortfolioStore extends ChangeNotifier {
     _disposed = true;
     _timer?.cancel();
     _cache.clear();
+    for (final read in _pending.values.toList()) {
+      read.cancel.cancel();
+    }
     _pending.clear();
     api.dispose();
     super.dispose();

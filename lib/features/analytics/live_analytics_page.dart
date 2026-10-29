@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import '../../core/network/backend_cancellation.dart';
+import '../import/import_api.dart';
 import '../../core/theme/app_colors.dart';
 import '../../shared/widgets/finance_ui.dart';
 import '../../shared/widgets/panel.dart';
@@ -38,6 +40,7 @@ class _LiveAnalyticsPageState extends State<LiveAnalyticsPage> {
   bool started = false, loading = false, loadingWins = false;
   int performanceRequest = 0, winsRequest = 0;
   int lastRevision = -1;
+  BackendCancellation? performanceCancellation, winsCancellation;
   @override
   void initState() {
     super.initState();
@@ -48,6 +51,15 @@ class _LiveAnalyticsPageState extends State<LiveAnalyticsPage> {
   @override
   void didUpdateWidget(covariant LiveAnalyticsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!widget.active && oldWidget.active) {
+      performanceCancellation?.cancel();
+      winsCancellation?.cancel();
+      performanceRequest++;
+      winsRequest++;
+      loading = false;
+      loadingWins = false;
+      started = false;
+    }
     startIfActive();
   }
 
@@ -64,11 +76,15 @@ class _LiveAnalyticsPageState extends State<LiveAnalyticsPage> {
 
   @override
   void dispose() {
+    performanceCancellation?.cancel();
+    winsCancellation?.cancel();
     widget.store.removeListener(startIfActive);
     super.dispose();
   }
 
   Future<void> load({bool force = false}) async {
+    performanceCancellation?.cancel();
+    final cancel = performanceCancellation = BackendCancellation();
     final id = ++performanceRequest;
     final c = category, r = range, b = benchmark;
     setState(() {
@@ -80,6 +96,7 @@ class _LiveAnalyticsPageState extends State<LiveAnalyticsPage> {
       final value = await widget.store.request(
         '/trades/analytics/performance?category=$c&range=$r&benchmarkId=$b',
         force: force,
+        cancel: cancel,
       );
       if (value['calculationVersion'] != 2 ||
           value['category'] != c ||
@@ -92,10 +109,12 @@ class _LiveAnalyticsPageState extends State<LiveAnalyticsPage> {
       if (mounted && id == performanceRequest) {
         setState(() => performance = value);
       }
-    } catch (_) {
+    } catch (failure) {
       if (mounted && id == performanceRequest) {
         setState(
-          () => performanceError = 'โหลดกราฟเปรียบเทียบไม่สำเร็จ กรุณาลองใหม่',
+          () => performanceError = failure is ImportFailure
+              ? failure.message
+              : 'โหลดกราฟเปรียบเทียบไม่สำเร็จ กรุณาลองใหม่',
         );
       }
     } finally {
@@ -104,6 +123,8 @@ class _LiveAnalyticsPageState extends State<LiveAnalyticsPage> {
   }
 
   Future<void> loadWins({bool force = false}) async {
+    winsCancellation?.cancel();
+    final cancel = winsCancellation = BackendCancellation();
     final id = ++winsRequest;
     final c = category, r = range, u = unit;
     setState(() {
@@ -115,6 +136,7 @@ class _LiveAnalyticsPageState extends State<LiveAnalyticsPage> {
       final value = await widget.store.request(
         '/trades/analytics/win-rate?category=$c&range=$r&unit=$u',
         force: force,
+        cancel: cancel,
       );
       if (value['calculationVersion'] != 2 ||
           value['category'] != c ||
@@ -124,9 +146,13 @@ class _LiveAnalyticsPageState extends State<LiveAnalyticsPage> {
         throw const FormatException('ANALYTICS_RESPONSE_INVALID');
       }
       if (mounted && id == winsRequest) setState(() => wins = value);
-    } catch (_) {
+    } catch (failure) {
       if (mounted && id == winsRequest) {
-        setState(() => winsError = 'โหลดอัตราชนะตลาดไม่สำเร็จ กรุณาลองใหม่');
+        setState(
+          () => winsError = failure is ImportFailure
+              ? failure.message
+              : 'โหลดอัตราชนะตลาดไม่สำเร็จ กรุณาลองใหม่',
+        );
       }
     } finally {
       if (mounted && id == winsRequest) setState(() => loadingWins = false);

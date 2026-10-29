@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../../core/network/backend_cancellation.dart';
 import 'package:flutter/material.dart';
 import '../../shared/widgets/finance_ui.dart';
 import '../../shared/widgets/finance_charts.dart' show AllocationRing;
@@ -20,8 +21,10 @@ class LiveOverviewPage extends StatefulWidget {
     required this.onAsset,
     required this.onImport,
     required this.onAnalytics,
+    this.active = true,
   });
   final PortfolioStore store;
+  final bool active;
   final String name;
   final ValueChanged<Holding> onAsset;
   final VoidCallback onImport, onAnalytics;
@@ -42,6 +45,8 @@ class _LiveOverviewPageState extends State<LiveOverviewPage>
   DateTime? comparisonDue;
   bool loadingComparison = false;
   bool appActive = true;
+  int comparisonRequest = 0;
+  BackendCancellation? historyCancellation, comparisonCancellation;
   @override
   void initState() {
     super.initState();
@@ -52,14 +57,38 @@ class _LiveOverviewPageState extends State<LiveOverviewPage>
 
   @override
   void dispose() {
+    historyCancellation?.cancel();
+    comparisonCancellation?.cancel();
     widget.store.removeListener(ready);
     WidgetsBinding.instance.removeObserver(this);
     comparisonTimer?.cancel();
     super.dispose();
   }
 
+  @override
+  void didUpdateWidget(covariant LiveOverviewPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.active && oldWidget.active) {
+      historyCancellation?.cancel();
+      comparisonCancellation?.cancel();
+      request++;
+      comparisonRequest++;
+      loading = false;
+      loadingComparison = false;
+      comparisonTimer?.cancel();
+    } else if (widget.active && !oldWidget.active) {
+      if (started && lastRevision == widget.store.revision) {
+        load();
+        compare();
+      } else {
+        ready();
+      }
+    }
+  }
+
   void ready() {
-    if ((!started || lastRevision != widget.store.revision) &&
+    if (widget.active &&
+        (!started || lastRevision != widget.store.revision) &&
         widget.store.data != null &&
         widget.store.data!.items.isNotEmpty) {
       started = true;
@@ -70,6 +99,8 @@ class _LiveOverviewPageState extends State<LiveOverviewPage>
   }
 
   Future<void> load({bool force = false}) async {
+    historyCancellation?.cancel();
+    final cancel = historyCancellation = BackendCancellation();
     final id = ++request;
     setState(() {
       loading = true;
@@ -80,6 +111,7 @@ class _LiveOverviewPageState extends State<LiveOverviewPage>
       final value = await widget.store.request(
         '/trades/portfolio-history?range=$period',
         force: force,
+        cancel: cancel,
       );
       if (value['range'] != period ||
           value['currency'] != 'THB' ||
@@ -87,9 +119,13 @@ class _LiveOverviewPageState extends State<LiveOverviewPage>
         throw const ImportFailure('INVALID_RESPONSE');
       }
       if (mounted && id == request) setState(() => history = value);
-    } catch (_) {
+    } catch (failure) {
       if (mounted && id == request) {
-        setState(() => historyError = 'โหลดกราฟย้อนหลังไม่สำเร็จ กรุณาลองใหม่');
+        setState(
+          () => historyError = failure is ImportFailure
+              ? failure.message
+              : 'โหลดกราฟย้อนหลังไม่สำเร็จ กรุณาลองใหม่',
+        );
       }
     } finally {
       if (mounted && id == request) setState(() => loading = false);
@@ -98,6 +134,8 @@ class _LiveOverviewPageState extends State<LiveOverviewPage>
 
   Future<void> compare({bool force = false}) async {
     if (loadingComparison) return;
+    final id = ++comparisonRequest;
+    final cancel = comparisonCancellation = BackendCancellation();
     comparisonTimer?.cancel();
     setState(() {
       loadingComparison = true;
@@ -108,6 +146,7 @@ class _LiveOverviewPageState extends State<LiveOverviewPage>
       final value = await widget.store.request(
         '/trades/market-indices',
         force: force,
+        cancel: cancel,
       );
       if (value['items'] is! List) {
         throw const ImportFailure('INVALID_RESPONSE');
@@ -116,15 +155,21 @@ class _LiveOverviewPageState extends State<LiveOverviewPage>
         final retry = DateTime.tryParse(textValue(item['retryAt']) ?? '');
         if (retry != null && retry.isAfter(due)) due = retry;
       }
-      if (mounted) setState(() => comparisons = value);
-    } catch (_) {
-      if (mounted) {
-        setState(() => comparisonError = 'โหลดดัชนีตลาดไม่สำเร็จ กรุณาลองใหม่');
+      if (mounted && id == comparisonRequest) {
+        setState(() => comparisons = value);
+      }
+    } catch (failure) {
+      if (mounted && id == comparisonRequest) {
+        setState(
+          () => comparisonError = failure is ImportFailure
+              ? failure.message
+              : 'โหลดดัชนีตลาดไม่สำเร็จ กรุณาลองใหม่',
+        );
       }
     } finally {
-      if (mounted) {
+      if (mounted && id == comparisonRequest) {
         setState(() => loadingComparison = false);
-        comparisonDue = due;
+        comparisonDue = comparisonError == null ? due : null;
         scheduleComparison();
       }
     }
@@ -132,7 +177,9 @@ class _LiveOverviewPageState extends State<LiveOverviewPage>
 
   void scheduleComparison() {
     comparisonTimer?.cancel();
-    if (!mounted || !appActive || comparisonDue == null) return;
+    if (!mounted || !widget.active || !appActive || comparisonDue == null) {
+      return;
+    }
     final wait = comparisonDue!.difference(DateTime.now());
     comparisonTimer = Timer(
       wait.isNegative ? Duration.zero : wait,
@@ -492,7 +539,7 @@ class _LiveOverviewPageState extends State<LiveOverviewPage>
                     'การเปลี่ยนแปลงจากวันก่อนหน้า',
                     style: TextStyle(fontSize: 10, color: Colors.white38),
                   ),
-                  if (comparisons == null)
+                  if (comparisons == null || comparisonError != null)
                     DataNotice(
                       comparisonError ?? 'กำลังโหลดข้อมูลเปรียบเทียบ',
                       loading: loadingComparison,

@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import '../../core/auth/auth_controller.dart';
 import '../../core/config/app_config.dart';
 import 'import_models.dart';
+import '../../core/network/backend_client.dart';
+import '../../core/network/backend_cancellation.dart';
 
 class ImportFailure implements Exception {
   const ImportFailure(this.code);
@@ -62,6 +65,9 @@ String importMessage(String code) =>
       'GMAIL_REQUEST_FAILED': 'เรียกข้อมูล Gmail ไม่สำเร็จ กรุณาลองใหม่',
       'MAIL_OAUTH_STATE_INVALID': 'คำขออนุญาตหมดอายุ กรุณาเชื่อมต่อ Gmail ใหม่',
       'MAIL_CONSENT_DENIED': 'คุณยังไม่ได้อนุญาตให้อ่าน Gmail',
+      'MAIL_CONNECTION_FAILED': 'เชื่อมต่อ Gmail ไม่สำเร็จ กรุณาเชื่อมต่อใหม่',
+      'INVALID_MAIL_CLIENT':
+          'รูปแบบการเชื่อมเมลไม่ถูกต้อง กรุณาอัปเดตแอปและ Backend',
       'MAIL_OAUTH_CODE_INVALID':
           'ยืนยันสิทธิ์ Gmail ไม่สำเร็จ กรุณาเชื่อมต่อใหม่',
       'MAIL_PERMISSION_REQUIRED': 'ต้องอนุญาตสิทธิ์อ่าน Gmail เพื่อซิงค์',
@@ -76,6 +82,8 @@ String importMessage(String code) =>
           'ระบบจัดเก็บข้อมูลลงทุนยังไม่พร้อม กรุณาติดต่อผู้ดูแล',
       'DOCUMENT_NOT_FOUND': 'ไม่พบเอกสาร หรือคุณไม่มีสิทธิ์เข้าถึง',
       'NETWORK': 'เชื่อมต่อ Backend ไม่สำเร็จ กรุณาลองใหม่',
+      'BACKEND_NOT_READY': 'เชื่อมต่อระบบไม่ได้ กรุณาลองใหม่',
+      'REQUEST_CANCELLED': 'คำขอถูกยกเลิก',
       'TIMEOUT': 'ใช้เวลานานเกินกำหนด กรุณาลองใหม่ ผลบางส่วนอาจบันทึกแล้ว',
       'INVALID_RESPONSE': 'Backend ตอบข้อมูลไม่ครบ กรุณาลองใหม่',
       'ACCOUNT_CHANGED': 'บัญชีผู้ใช้เปลี่ยนไป กรุณาเริ่มใหม่',
@@ -88,8 +96,19 @@ class ImportApi {
     this.onUnauthorized,
     http.Client? client,
     String? apiUrl,
-  }) : _http = client ?? http.Client(),
-       _apiUrl = apiUrl ?? AppConfig.apiUrl;
+    BackendClient? backend,
+    this.accountCancellation,
+    bool checkReadiness = true,
+  }) : _backend =
+           backend ??
+           BackendClient(
+             apiUrl: apiUrl ?? AppConfig.apiUrl,
+             healthUrl: apiUrl == null ? AppConfig.healthUrl : null,
+             client: client,
+             checkReadiness: checkReadiness,
+           ),
+       _ownsBackend = backend == null,
+       _apiUrl = backend?.api.toString() ?? apiUrl ?? AppConfig.apiUrl;
   factory ImportApi.forAuth(AuthController auth) {
     final accountId = auth.user?.id;
     return ImportApi(
@@ -100,24 +119,36 @@ class ImportApi {
         return auth.tokenForApi();
       },
       onUnauthorized: auth.logout,
+      backend: auth.backend,
+      accountCancellation: auth.sessionRequests,
     );
   }
   final Future<String> Function() tokenProvider;
   final Future<void> Function()? onUnauthorized;
-  final http.Client _http;
+  final BackendClient _backend;
+  final bool _ownsBackend;
+  final BackendCancellation? accountCancellation;
+  final _lifetime = BackendCancellation();
   final String _apiUrl;
   Uri _uri(String path) =>
       Uri.parse('${_apiUrl.replaceFirst(RegExp(r'/$'), '')}$path');
 
   Future<Map<String, dynamic>> _send(
-    http.BaseRequest request, {
+    String method,
+    Uri uri,
+    BackendRequestFactory createRequest, {
     Duration timeout = const Duration(seconds: 30),
+    BackendCancellation? cancel,
   }) async {
     try {
-      request.headers['Authorization'] = 'Bearer ${await tokenProvider()}';
-      final response = await (() async => http.Response.fromStream(
-        await _http.send(request),
-      ))().timeout(timeout);
+      final response = await _backend.send(
+        method: method,
+        uri: uri,
+        createRequest: createRequest,
+        timeout: timeout,
+        tokenProvider: tokenProvider,
+        cancel: [_lifetime, accountCancellation, cancel],
+      );
       final data = objectMap(jsonDecode(response.body));
       if (response.statusCode >= 400) {
         final code = textValue(objectMap(data['error'])['code']) ?? 'UNKNOWN';
@@ -129,6 +160,10 @@ class ImportApi {
       }
       if (data.isEmpty) throw const ImportFailure('INVALID_RESPONSE');
       return data;
+    } on BackendNotReady {
+      throw const ImportFailure('BACKEND_NOT_READY');
+    } on BackendCancelled {
+      throw const ImportFailure('REQUEST_CANCELLED');
     } on TimeoutException {
       throw const ImportFailure('TIMEOUT');
     } on http.ClientException {
@@ -145,13 +180,23 @@ class ImportApi {
     String method = 'GET',
     Map<String, dynamic>? body,
     Duration timeout = const Duration(seconds: 30),
+    BackendCancellation? cancel,
   }) {
-    final request = http.Request(method, _uri(path));
-    if (body != null) {
-      request.headers['Content-Type'] = 'application/json';
-      request.body = jsonEncode(body);
-    }
-    return _send(request, timeout: timeout);
+    final uri = _uri(path);
+    return _send(
+      method,
+      uri,
+      (abort) {
+        final request = http.AbortableRequest(method, uri, abortTrigger: abort);
+        if (body != null) {
+          request.headers['Content-Type'] = 'application/json';
+          request.body = jsonEncode(body);
+        }
+        return request;
+      },
+      timeout: timeout,
+      cancel: cancel,
+    );
   }
 
   Future<PdfPreview> upload(SelectedPdf file, String password) async {
@@ -164,21 +209,25 @@ class ImportApi {
     if (password.length > 128) {
       throw const ImportFailure('INVALID_PDF_PASSWORD');
     }
-    final request = http.MultipartRequest(
-      'POST',
-      _uri('/trades/upload-preview'),
-    );
-    request.files.add(
-      http.MultipartFile.fromBytes(
-        'file',
-        file.bytes,
-        filename: file.name,
-        contentType: MediaType('application', 'pdf'),
-      ),
-    );
-    if (password.isNotEmpty) request.fields['pdfPassword'] = password;
+    final uri = _uri('/trades/upload-preview');
     return checkedPreview(
-      await _send(request, timeout: const Duration(seconds: 180)),
+      await _send('POST', uri, (abort) {
+        final request = http.AbortableMultipartRequest(
+          'POST',
+          uri,
+          abortTrigger: abort,
+        );
+        request.files.add(
+          http.MultipartFile.fromBytes(
+            'file',
+            file.bytes,
+            filename: file.name,
+            contentType: MediaType('application', 'pdf'),
+          ),
+        );
+        if (password.isNotEmpty) request.fields['pdfPassword'] = password;
+        return request;
+      }, timeout: const Duration(seconds: 180)),
     );
   }
 
@@ -198,8 +247,11 @@ class ImportApi {
     await jsonRequest('/trades/documents/${Uri.encodeComponent(id)}'),
   );
   Future<Map<String, dynamic>> connection() => jsonRequest('/mail/connection');
-  Future<Map<String, dynamic>> connect() =>
-      jsonRequest('/mail/gmail/connect', method: 'POST', body: {});
+  Future<Map<String, dynamic>> connect() => jsonRequest(
+    '/mail/gmail/connect',
+    method: 'POST',
+    body: {'client': kIsWeb ? 'web' : 'mobile'},
+  );
   Future<Map<String, dynamic>> disconnect() =>
       jsonRequest('/mail/gmail/connection', method: 'DELETE');
   Future<MailBatch> sync(
@@ -220,5 +272,8 @@ class ImportApi {
     body: {'documentIds': ids},
     timeout: const Duration(seconds: 180),
   );
-  void dispose() => _http.close();
+  void dispose() {
+    _lifetime.cancel();
+    if (_ownsBackend) _backend.dispose();
+  }
 }

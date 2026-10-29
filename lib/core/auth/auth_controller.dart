@@ -5,6 +5,8 @@ import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../config/app_config.dart';
 import 'app_user.dart';
+import '../network/backend_client.dart';
+import '../network/backend_cancellation.dart';
 
 class LoginFailure implements Exception {
   const LoginFailure(this.message);
@@ -14,12 +16,37 @@ class LoginFailure implements Exception {
 }
 
 class AuthController extends ChangeNotifier {
-  AuthController(this.supabase, {http.Client? httpClient, String? apiUrl})
-    : _http = httpClient ?? http.Client(),
-      _apiUrl = apiUrl ?? AppConfig.apiUrl {
+  AuthController(
+    this.supabase, {
+    http.Client? httpClient,
+    String? apiUrl,
+    bool checkReadiness = true,
+    BackendClient? backendClient,
+  }) : backend =
+           backendClient ??
+           BackendClient(
+             apiUrl: apiUrl ?? AppConfig.apiUrl,
+             healthUrl: apiUrl == null ? AppConfig.healthUrl : null,
+             client: httpClient,
+             checkReadiness: checkReadiness,
+           ),
+       _apiUrl = backendClient?.api.toString() ?? apiUrl ?? AppConfig.apiUrl {
     _subscription = supabase.auth.onAuthStateChange.listen(
       (state) {
+        final userId = state.session?.user.id;
+        if (_sessionUserId != null && userId != _sessionUserId) {
+          _sessionRequests.cancel();
+          _sessionRequests = BackendCancellation();
+          _epoch++;
+          user = null;
+          _loadingProfile = false;
+          profileError = null;
+        }
+        _sessionUserId = userId;
         if (state.event == AuthChangeEvent.signedOut) {
+          _loadingProfile = false;
+          _sessionRequests.cancel();
+          _sessionRequests = BackendCancellation();
           _epoch++;
           user = null;
           profileError = null;
@@ -39,7 +66,10 @@ class AuthController extends ChangeNotifier {
     );
   }
   final SupabaseClient supabase;
-  final http.Client _http;
+  final BackendClient backend;
+  BackendCancellation _sessionRequests = BackendCancellation();
+  BackendCancellation get sessionRequests => _sessionRequests;
+  String? _sessionUserId;
   final String _apiUrl;
   late final StreamSubscription<AuthState> _subscription;
   AppUser? user;
@@ -75,22 +105,38 @@ class AuthController extends ChangeNotifier {
   Future<Map<String, dynamic>> _request(
     String path, {
     Map<String, dynamic>? body,
-    String? token,
+    bool authorized = false,
     String method = 'POST',
   }) async {
     try {
       final uri = Uri.parse('${_apiUrl.replaceFirst(RegExp(r'/$'), '')}$path');
-      final headers = <String, String>{
-        if (body != null) 'Content-Type': 'application/json',
-        if (token != null) 'Authorization': 'Bearer $token',
-      };
-      final response =
-          await (body == null
-                  ? _http.get(uri, headers: headers)
-                  : method == 'PATCH'
-                  ? _http.patch(uri, headers: headers, body: jsonEncode(body))
-                  : _http.post(uri, headers: headers, body: jsonEncode(body)))
-              .timeout(const Duration(seconds: 20));
+      final requestMethod = body == null ? 'GET' : method;
+      final response = await backend.send(
+        method: requestMethod,
+        uri: uri,
+        timeout: const Duration(seconds: 20),
+        cancel: [_sessionRequests],
+        tokenProvider: !authorized
+            ? null
+            : () async {
+                if (supabase.auth.currentSession?.isExpired == true) {
+                  await supabase.auth.refreshSession();
+                }
+                return supabase.auth.currentSession?.accessToken;
+              },
+        createRequest: (abort) {
+          final request = http.AbortableRequest(
+            requestMethod,
+            uri,
+            abortTrigger: abort,
+          );
+          if (body != null) {
+            request.headers['Content-Type'] = 'application/json';
+            request.body = jsonEncode(body);
+          }
+          return request;
+        },
+      );
       Map<String, dynamic> data;
       try {
         data = jsonDecode(response.body) as Map<String, dynamic>;
@@ -120,11 +166,15 @@ class AuthController extends ChangeNotifier {
         });
       }
       return data;
+    } on BackendNotReady catch (failure) {
+      throw LoginFailure(failure.message);
+    } on BackendCancelled {
+      throw const LoginFailure('คำขอถูกยกเลิก');
     } on TimeoutException {
       throw const LoginFailure('Backend ใช้เวลาตอบนานเกินไป กรุณาลองใหม่');
     } on http.ClientException {
       throw const LoginFailure(
-        'เชื่อมต่อ Backend ไม่สำเร็จ กรุณาตรวจว่า Backend เปิดอยู่และอนุญาต origin ของแอป',
+        'เชื่อมต่อระบบไม่ได้ กรุณาตรวจสอบการเชื่อมต่อแล้วลองใหม่',
       );
     }
   }
@@ -204,19 +254,13 @@ class AuthController extends ChangeNotifier {
       }
       Map<String, dynamic> data;
       try {
-        data = await _request(
-          '/auth/me',
-          token: supabase.auth.currentSession?.accessToken,
-        );
+        data = await _request('/auth/me', authorized: true);
       } on LoginFailure catch (failure) {
         if (failure.message != 'SESSION_EXPIRED') rethrow;
         await supabase.auth.refreshSession().timeout(
           const Duration(seconds: 20),
         );
-        data = await _request(
-          '/auth/me',
-          token: supabase.auth.currentSession?.accessToken,
-        );
+        data = await _request('/auth/me', authorized: true);
       }
       final account = AppUser.fromJson(data);
       if (account.id != supabase.auth.currentUser?.id) {
@@ -235,8 +279,8 @@ class AuthController extends ChangeNotifier {
         }
       }
     } finally {
-      _loadingProfile = false;
       if (epoch == _epoch && !_disposed) {
+        _loadingProfile = false;
         restoring = false;
         notifyListeners();
       }
@@ -244,6 +288,9 @@ class AuthController extends ChangeNotifier {
   }
 
   Future<void> logout() async {
+    _loadingProfile = false;
+    _sessionRequests.cancel();
+    _sessionRequests = BackendCancellation();
     _epoch++;
     user = null;
     error = null;
@@ -278,7 +325,7 @@ class AuthController extends ChangeNotifier {
       final data = await _request(
         '/auth/credentials',
         method: 'PATCH',
-        token: supabase.auth.currentSession?.accessToken,
+        authorized: true,
         body: {
           if (username != null) 'username': username.trim(),
           'password': ?password,
@@ -355,7 +402,8 @@ class AuthController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _subscription.cancel();
-    _http.close();
+    _sessionRequests.cancel();
+    backend.dispose();
     super.dispose();
   }
 }

@@ -7,6 +7,7 @@ import 'package:project_portfoliomanagement_mobile/features/import/import_api.da
 import 'package:project_portfoliomanagement_mobile/features/portfolio/portfolio_data.dart';
 import 'package:project_portfoliomanagement_mobile/features/portfolio/portfolio_store.dart';
 import 'fixtures/holdings_fixture.dart';
+import 'package:project_portfoliomanagement_mobile/core/network/backend_cancellation.dart';
 
 http.Response response(Object body) => http.Response(
   jsonEncode(body),
@@ -16,6 +17,7 @@ http.Response response(Object body) => http.Response(
 PortfolioStore storeFor(Future<http.Response> Function(http.Request) handler) =>
     PortfolioStore(
       ImportApi(
+        checkReadiness: false,
         tokenProvider: () async => 'token',
         client: MockClient(handler),
         apiUrl: 'http://localhost:3000/api/v1',
@@ -143,12 +145,37 @@ void main() {
     addTearDown(store.dispose);
     final a = store.request('/trades/portfolio-history?range=ALL');
     final b = store.request('/trades/portfolio-history?range=ALL');
-    expect(identical(a, b), isTrue);
     pending.complete(response({'points': [], 'range': 'ALL'}));
-    await Future.wait([a, b]);
+    final values = await Future.wait([a, b]);
+    expect(values[0], values[1]); // Independent waiters share one HTTP flight.
     await store.request('/trades/portfolio-history?range=ALL');
     expect(calls, 1);
   });
+  test(
+    'one cancelled chart consumer does not cancel the shared request or cache for another',
+    () async {
+      var calls = 0;
+      final pending = Completer<http.Response>();
+      final store = storeFor((_) async {
+        calls++;
+        return pending.future;
+      });
+      addTearDown(store.dispose);
+      final cancelled = BackendCancellation();
+      final a = store.request(
+        '/trades/portfolio-history?range=ALL',
+        cancel: cancelled,
+      );
+      final failed = expectLater(a, throwsA(isA<BackendCancelled>()));
+      final b = store.request('/trades/portfolio-history?range=ALL');
+      cancelled.cancel();
+      await failed;
+      pending.complete(response({'range': 'ALL', 'points': []}));
+      expect((await b)['range'], 'ALL');
+      await store.request('/trades/portfolio-history?range=ALL');
+      expect(calls, 1);
+    },
+  );
   test(
     'quote refresh preserves chart cache, changed investment data invalidates it',
     () async {

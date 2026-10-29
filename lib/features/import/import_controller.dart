@@ -7,8 +7,10 @@ class ImportController extends ChangeNotifier {
   final ImportApi api;
   final bool mail;
   bool busy = false, loadingConnection = false, scanning = false;
+  bool awaitingMailCallback = false;
   bool stopRequested = false, stopped = false, needsReconnect = false;
   bool _disposed = false;
+  Future<void>? _connectionTask;
   Object months = 'all';
   SelectedPdf? file;
   PdfPreview? preview;
@@ -92,7 +94,16 @@ class ImportController extends ChangeNotifier {
     _emit();
   }
 
-  Future<void> loadConnection({String? callbackCode}) async {
+  Future<void> loadConnection({String? callbackCode}) {
+    if (_connectionTask != null) return _connectionTask!;
+    final task = _loadConnection(callbackCode: callbackCode);
+    _connectionTask = task;
+    return task.whenComplete(() {
+      if (identical(_connectionTask, task)) _connectionTask = null;
+    });
+  }
+
+  Future<void> _loadConnection({String? callbackCode}) async {
     if (busy || loadingConnection) return;
     loadingConnection = true;
     error = null;
@@ -101,6 +112,9 @@ class ImportController extends ChangeNotifier {
       final value = await api.connection();
       if (_disposed) return;
       connection = value;
+      if (value['connected'] == true || callbackCode != null) {
+        awaitingMailCallback = false;
+      }
       needsReconnect = false;
       if (callbackCode != null) error = importMessage(callbackCode);
     } catch (failure) {
@@ -112,8 +126,11 @@ class ImportController extends ChangeNotifier {
   }
 
   Future<Uri?> connect() async {
-    if (busy || connection?['supported'] != true) return null;
+    if (busy || awaitingMailCallback || connection?['supported'] != true) {
+      return null;
+    }
     busy = true;
+    awaitingMailCallback = true;
     error = null;
     _emit();
     try {
@@ -129,10 +146,34 @@ class ImportController extends ChangeNotifier {
       }
       return url;
     } catch (failure) {
+      awaitingMailCallback = false;
       if (!_disposed) showError(failure);
       return null;
     } finally {
       busy = false;
+      _emit();
+    }
+  }
+
+  void connectionLaunchFailed(Object failure) {
+    awaitingMailCallback = false;
+    showError(failure);
+  }
+
+  Future<void> resumeMailAuthorization({
+    String? callbackCode,
+    bool fromCallback = false,
+  }) async {
+    if (_disposed || busy || !awaitingMailCallback && !fromCallback) return;
+    try {
+      // A lifecycle check may predate the callback: wait, then fetch fresh server state.
+      final pending = _connectionTask;
+      if (pending != null) await pending;
+      if (_disposed) return;
+      // Read the actual server state: returning from Google is not proof of consent.
+      await loadConnection(callbackCode: callbackCode);
+    } finally {
+      awaitingMailCallback = false;
       _emit();
     }
   }

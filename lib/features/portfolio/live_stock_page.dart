@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import '../../core/network/backend_cancellation.dart';
+import '../import/import_api.dart';
 import '../../core/theme/app_colors.dart';
 import '../../shared/widgets/finance_ui.dart';
 import '../../shared/widgets/panel.dart';
@@ -22,6 +24,13 @@ class _LiveStockPageState extends State<LiveStockPage> {
   List<Map<String, dynamic>>? rows;
   String? error;
   int request = 0;
+  BackendCancellation? historyCancellation;
+  @override
+  void dispose() {
+    historyCancellation?.cancel();
+    super.dispose();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -34,17 +43,23 @@ class _LiveStockPageState extends State<LiveStockPage> {
           .firstOrNull ??
       widget.asset;
   Future<void> load() async {
+    historyCancellation?.cancel();
+    final cancel = historyCancellation = BackendCancellation();
     final id = ++request;
     setState(() {
       rows = null;
       error = null;
     });
     try {
-      final value = await widget.store.transactions(asset);
+      final value = await widget.store.transactions(asset, cancel: cancel);
       if (mounted && id == request) setState(() => rows = value);
-    } catch (_) {
+    } catch (failure) {
       if (mounted && id == request) {
-        setState(() => error = 'โหลดประวัติซื้อขายไม่สำเร็จ กรุณาลองใหม่');
+        setState(
+          () => error = failure is ImportFailure
+              ? failure.message
+              : 'โหลดประวัติซื้อขายไม่สำเร็จ กรุณาลองใหม่',
+        );
       }
     }
   }

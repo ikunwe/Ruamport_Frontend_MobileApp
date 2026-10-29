@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../core/auth/app_user.dart';
 import '../../core/auth/auth_scope.dart';
+import '../../core/network/mail_callback.dart';
 import '../import/import_api.dart';
 import '../import/investment_import_sheet.dart';
 import '../portfolio/portfolio_store.dart';
@@ -44,10 +45,12 @@ class _DashboardPageState extends State<DashboardPage>
   String userName = 'ผู้ใช้งานตัวอย่าง';
   String? mailCallbackCode;
   PortfolioStore? portfolio;
+  bool _mailSheetOpen = false;
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    mailCallbackInbox.addListener(mailReturned);
     userName = widget.account?.displayName ?? userName;
     if (widget.account != null &&
         Uri.base.path == '/mail/return' &&
@@ -70,6 +73,20 @@ class _DashboardPageState extends State<DashboardPage>
         ..addListener(portfolioChanged);
       Future<void>(() => portfolio?.refresh());
     }
+    mailReturned();
+  }
+
+  void mailReturned() {
+    if (!mounted || widget.account == null || _mailSheetOpen) return;
+    final result = mailCallbackInbox.take();
+    if (result == null) return;
+    _mailSheetOpen = true;
+    mailCallbackCode = result.errorCode;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _mailSheetOpen = false;
+      importData(true);
+    });
   }
 
   void portfolioChanged() {
@@ -82,6 +99,7 @@ class _DashboardPageState extends State<DashboardPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    mailCallbackInbox.removeListener(mailReturned);
     portfolio?.removeListener(portfolioChanged);
     portfolio?.dispose();
     super.dispose();
@@ -121,7 +139,7 @@ class _DashboardPageState extends State<DashboardPage>
     }
   }
 
-  void openSheet(Widget child) => showModalBottomSheet<void>(
+  Future<void> openSheet(Widget child) => showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,
     useSafeArea: true,
@@ -148,6 +166,7 @@ class _DashboardPageState extends State<DashboardPage>
     if (widget.account != null && auth != null) {
       final callbackCode = mailCallbackCode;
       mailCallbackCode = null;
+      if (mail) _mailSheetOpen = true;
       openSheet(
         InvestmentImportSheet(
           mail: mail,
@@ -157,7 +176,12 @@ class _DashboardPageState extends State<DashboardPage>
             if (mounted) portfolio?.refresh(afterImport: true);
           },
         ),
-      );
+      ).whenComplete(() {
+        if (mail) {
+          _mailSheetOpen = false;
+          if (mounted) mailReturned();
+        }
+      });
       return;
     }
     openSheet(
@@ -458,6 +482,7 @@ class _DashboardPageState extends State<DashboardPage>
                   children: portfolio != null
                       ? [
                           LiveOverviewPage(
+                            active: selected == 0,
                             store: portfolio!,
                             name: userName,
                             onImport: chooseImport,

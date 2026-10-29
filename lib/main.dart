@@ -3,6 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'core/auth/auth_controller.dart';
 import 'core/auth/secure_auth_storage.dart';
 import 'core/config/app_config.dart';
+import 'core/network/mail_callback.dart';
 
 import 'app.dart';
 export 'app.dart';
@@ -25,6 +26,7 @@ Future<void> main() async {
               uri.path == '/callback',
     ),
   );
+  await mailCallbackInbox.start();
   final auth = AuthController(Supabase.instance.client);
   // เริ่ม restore ก่อน build แรก เพื่อไม่แสดงหน้า Login แวบระหว่างโหลด session
   final restoring = auth.restore();

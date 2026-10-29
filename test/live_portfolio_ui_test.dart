@@ -38,6 +38,7 @@ void main() {
         var saleCalls = 0;
         final store = PortfolioStore(
           ImportApi(
+            checkReadiness: false,
             tokenProvider: () async => 'test-token',
             client: MockClient((request) async {
               final q = request.url.queryParameters;

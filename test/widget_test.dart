@@ -42,7 +42,7 @@ void main() {
           image.dispose();
         });
       }
-      expect(find.text('รองรับหลายแพลตฟอร์มลงทุน'), findsOneWidget);
+      expect(find.text('แพลตฟอร์มลงทุนที่รองรับ'), findsOneWidget);
       expect(find.text('Get started'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.ensureVisible(find.text('Get started'));

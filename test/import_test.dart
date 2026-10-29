@@ -106,6 +106,7 @@ ImportApi apiFor(
   Future<http.Response> Function(http.Request) handler, {
   Future<void> Function()? unauthorized,
 }) => ImportApi(
+  checkReadiness: false,
   tokenProvider: () async => 'access-token',
   onUnauthorized: unauthorized,
   client: MockClient(handler),
@@ -122,6 +123,136 @@ const connected = {
 };
 
 void main() {
+  test(
+    'returning from Google without consent stops pending state and permits a new connect',
+    () async {
+      var requests = 0;
+      final controller = ImportController(
+        apiFor((request) async {
+          if (request.url.path.endsWith('/connect')) {
+            requests++;
+            return jsonResponse({
+              'authorizationUrl':
+                  'https://accounts.google.com/o/oauth2/v2/auth',
+            });
+          }
+          return jsonResponse({
+            'supported': true,
+            'connected': false,
+            'connection': null,
+          });
+        }),
+        mail: true,
+      );
+      addTearDown(controller.dispose);
+      await controller.loadConnection();
+      await controller.connect();
+      expect(controller.awaitingMailCallback, isTrue);
+      await controller.resumeMailAuthorization();
+      expect(controller.awaitingMailCallback, isFalse);
+      expect(controller.connection?['connected'], isFalse);
+      expect(controller.loadingConnection, isFalse);
+      expect(await controller.connect(), isNotNull);
+      expect(requests, 2);
+    },
+  );
+
+  test(
+    'failed status check on return also releases the connect button and preserves the error',
+    () async {
+      var fail = false;
+      final controller = ImportController(
+        apiFor((request) async {
+          if (request.url.path.endsWith('/connect')) {
+            return jsonResponse({
+              'authorizationUrl':
+                  'https://accounts.google.com/o/oauth2/v2/auth',
+            });
+          }
+          if (fail) throw http.ClientException('network');
+          return jsonResponse({
+            'supported': true,
+            'connected': false,
+            'connection': null,
+          });
+        }),
+        mail: true,
+      );
+      addTearDown(controller.dispose);
+      await controller.loadConnection();
+      await controller.connect();
+      fail = true;
+      await controller.resumeMailAuthorization();
+      expect(controller.awaitingMailCallback, isFalse);
+      expect(controller.loadingConnection, isFalse);
+      expect(controller.error, importMessage('NETWORK'));
+    },
+  );
+  test(
+    'mail connect stays pending until callback and prevents duplicate authorization requests',
+    () async {
+      var requests = 0, linked = false;
+      final controller = ImportController(
+        apiFor((request) async {
+          if (request.url.path.endsWith('/connect')) {
+            requests++;
+            return jsonResponse({
+              'authorizationUrl':
+                  'https://accounts.google.com/o/oauth2/v2/auth?state=test',
+            });
+          }
+          return jsonResponse({
+            'supported': true,
+            'connected': linked,
+            'connection': null,
+          });
+        }),
+        mail: true,
+      );
+      addTearDown(controller.dispose);
+      await controller.loadConnection();
+      expect(await controller.connect(), isNotNull);
+      expect(controller.awaitingMailCallback, isTrue);
+      expect(controller.busy, isFalse);
+      expect(await controller.connect(), isNull);
+      expect(requests, 1);
+      linked = true;
+      await controller.loadConnection();
+      expect(controller.awaitingMailCallback, isFalse);
+    },
+  );
+
+  test(
+    'failed launcher or error callback stops the mail connection spinner and permits retry',
+    () async {
+      final controller = ImportController(
+        apiFor(
+          (request) async => request.url.path.endsWith('/connect')
+              ? jsonResponse({
+                  'authorizationUrl':
+                      'https://accounts.google.com/o/oauth2/v2/auth',
+                })
+              : jsonResponse({
+                  'supported': true,
+                  'connected': false,
+                  'connection': null,
+                }),
+        ),
+        mail: true,
+      );
+      addTearDown(controller.dispose);
+      await controller.loadConnection();
+      await controller.connect();
+      controller.connectionLaunchFailed(const ImportFailure('NETWORK'));
+      expect(controller.awaitingMailCallback, isFalse);
+      expect(controller.error, importMessage('NETWORK'));
+      await controller.connect();
+      expect(controller.awaitingMailCallback, isTrue);
+      await controller.loadConnection(callbackCode: 'MAIL_CONSENT_DENIED');
+      expect(controller.awaitingMailCallback, isFalse);
+      expect(controller.error, importMessage('MAIL_CONSENT_DENIED'));
+    },
+  );
   for (final type in [
     'DIME_THAI_STOCK_CONFIRMATION_NOTE',
     'DIME_MUTUAL_FUND_CONFIRMATION_NOTE',

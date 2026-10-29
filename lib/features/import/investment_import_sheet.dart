@@ -3,6 +3,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../core/theme/app_colors.dart';
+import '../../core/network/mail_authorization_return.dart';
+import '../../core/network/mail_callback.dart';
 import '../../shared/widgets/finance_ui.dart';
 import '../../shared/widgets/panel.dart';
 import 'import_api.dart';
@@ -33,14 +35,32 @@ class _InvestmentImportSheetState extends State<InvestmentImportSheet> {
   final password = TextEditingController();
   bool picking = false, confirmDisconnect = false;
   final reportedImports = <String>{};
+  MailAuthorizationReturnObserver? authorizationReturn;
   @override
   void initState() {
     super.initState();
     controller = ImportController(widget.api, mail: widget.mail)
       ..addListener(changed);
     if (widget.mail) {
+      mailCallbackInbox.addListener(mailReturned);
+      authorizationReturn = MailAuthorizationReturnObserver(() {
+        if (mounted) unawaited(controller.resumeMailAuthorization());
+      });
       unawaited(controller.loadConnection(callbackCode: widget.callbackCode));
     }
+  }
+
+  void mailReturned() {
+    if (!mounted || !widget.mail) return;
+    final result = mailCallbackInbox.take();
+    if (result == null) return;
+    authorizationReturn?.disarm();
+    unawaited(
+      controller.resumeMailAuthorization(
+        callbackCode: result.errorCode,
+        fromCallback: true,
+      ),
+    );
   }
 
   void changed() {
@@ -62,6 +82,8 @@ class _InvestmentImportSheetState extends State<InvestmentImportSheet> {
 
   @override
   void dispose() {
+    if (widget.mail) mailCallbackInbox.removeListener(mailReturned);
+    authorizationReturn?.dispose();
     password.dispose();
     controller.removeListener(changed);
     controller.dispose();
@@ -118,6 +140,7 @@ class _InvestmentImportSheetState extends State<InvestmentImportSheet> {
     password.clear();
     final uri = await controller.connect();
     if (!mounted || uri == null) return;
+    authorizationReturn?.arm();
     try {
       final launched = await launchUrl(
         uri,
@@ -125,10 +148,12 @@ class _InvestmentImportSheetState extends State<InvestmentImportSheet> {
         mode: LaunchMode.externalApplication,
       );
       if (!launched && mounted) {
-        controller.showError(const ImportFailure('NETWORK'));
+        authorizationReturn?.disarm();
+        controller.connectionLaunchFailed(const ImportFailure('NETWORK'));
       }
     } catch (failure) {
-      if (mounted) controller.showError(failure);
+      authorizationReturn?.disarm();
+      if (mounted) controller.connectionLaunchFailed(failure);
     }
   }
 
@@ -151,7 +176,8 @@ class _InvestmentImportSheetState extends State<InvestmentImportSheet> {
   @override
   Widget build(BuildContext context) {
     final c = controller;
-    final busy = c.busy || picking || c.loadingConnection;
+    final busy =
+        c.busy || picking || c.loadingConnection || c.awaitingMailCallback;
     final connected = c.connection?['connected'] == true && !c.needsReconnect;
     final supported = c.connection?['supported'] == true;
     return SafeArea(
@@ -223,8 +249,14 @@ class _InvestmentImportSheetState extends State<InvestmentImportSheet> {
                   const SizedBox(height: 12),
                   FilledButton.icon(
                     onPressed: busy ? null : connect,
-                    icon: const Icon(Icons.mail_outline, size: 18),
-                    label: const Text('เชื่อมต่อ Gmail'),
+                    icon: c.busy || c.awaitingMailCallback
+                        ? spinner()
+                        : const Icon(Icons.mail_outline, size: 18),
+                    label: Text(
+                      c.busy || c.awaitingMailCallback
+                          ? 'กำลังเชื่อมต่อ Gmail…'
+                          : 'เชื่อมต่อ Gmail',
+                    ),
                   ),
                 ] else ...[
                   Panel(

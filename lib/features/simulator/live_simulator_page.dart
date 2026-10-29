@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../core/network/backend_cancellation.dart';
 import '../../core/theme/app_colors.dart';
 import '../../shared/widgets/finance_ui.dart';
 import '../../shared/widgets/panel.dart';
@@ -28,6 +29,7 @@ class _LiveSimulatorPageState extends State<LiveSimulatorPage> {
   String? error;
   bool busy = false;
   int previous = -1;
+  BackendCancellation? saleCancellation;
   List<Holding> get assets => widget.store.data?.held ?? [];
   Holding? get asset =>
       assets.where((item) => item.key == selected).firstOrNull;
@@ -40,6 +42,7 @@ class _LiveSimulatorPageState extends State<LiveSimulatorPage> {
 
   @override
   void dispose() {
+    saleCancellation?.cancel();
     widget.store.removeListener(changed);
     for (final controller in [
       price,
@@ -148,11 +151,13 @@ class _LiveSimulatorPageState extends State<LiveSimulatorPage> {
       result = null;
     });
     try {
+      final cancel = saleCancellation = BackendCancellation();
       final response = await widget.store.api.jsonRequest(
         '/trades/simulate-sale',
         method: 'POST',
         body: input,
         timeout: const Duration(seconds: 90),
+        cancel: cancel,
       );
       if (!mounted) return;
       if (snapshot != widget.store.revision || selected != a.key) {

@@ -11,6 +11,7 @@ import 'package:project_portfoliomanagement_mobile/core/theme/app_theme.dart';
 import 'package:project_portfoliomanagement_mobile/features/auth/login_page.dart';
 import 'package:project_portfoliomanagement_mobile/app.dart';
 import 'package:project_portfoliomanagement_mobile/features/profile/account_sheet.dart';
+import 'package:project_portfoliomanagement_mobile/core/network/backend_client.dart';
 
 void main() {
   final user = {
@@ -77,6 +78,7 @@ void main() {
     );
     auth = AuthController(
       supabase,
+      checkReadiness: false,
       httpClient: MockClient((request) => backend(request)),
       apiUrl: 'http://localhost:3000/api/v1',
     );
@@ -231,6 +233,7 @@ void main() {
     );
     auth = AuthController(
       supabase,
+      checkReadiness: false,
       httpClient: MockClient((request) => backend(request)),
       apiUrl: 'http://localhost:3000/api/v1',
     );
@@ -398,4 +401,36 @@ void main() {
     expect(auth.hasSession, isFalse);
     expect(auth.restoring, isFalse);
   });
+
+  test(
+    'health failure preserves an existing session and manual profile retry succeeds',
+    () async {
+      await auth.login('real.username', 'password');
+      auth.dispose();
+      var healthy = false, businessCalls = 0;
+      final transport = BackendClient(
+        apiUrl: 'http://localhost:3000/api/v1',
+        client: MockClient((request) async {
+          if (request.url.path.endsWith('/health')) {
+            return healthy
+                ? json({'status': 'ok', 'service': 'portfolio-api'})
+                : json({'status': 'unavailable'}, 503);
+          }
+          businessCalls++;
+          return json(profile);
+        }),
+      );
+      auth = AuthController(supabase, backendClient: transport);
+      await auth.loadProfile();
+      expect(auth.hasSession, isTrue);
+      expect(auth.user, isNull);
+      expect(auth.profileError, 'เชื่อมต่อระบบไม่ได้ กรุณาลองใหม่');
+      expect(auth.restoring, isFalse);
+      expect(businessCalls, 0);
+      healthy = true;
+      await auth.loadProfile();
+      expect(auth.user?.username, 'real.username');
+      expect(auth.profileError, isNull);
+    },
+  );
 }

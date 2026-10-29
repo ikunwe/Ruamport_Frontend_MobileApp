@@ -1,6 +1,6 @@
 # PDF Preview และ Gmail Sync บน Flutter
 
-ทดสอบบน Edge โดยใช้ Backend เดิม ไม่แก้ Angular หรือโค้ด Backend
+รองรับ Flutter Web และ Android โดย Gmail callback มือถือใช้ Backend ที่รองรับ `client: mobile` ตามด้านล่าง ไม่แก้ Angular
 
 ```sh
 flutter run -d edge --web-port 4200 --web-hostname localhost
@@ -19,6 +19,26 @@ flutter run -d edge --web-port 4200 --web-hostname localhost
 - Monthly ยังปิดใช้งาน แจ้งตาม Backend แทนการแจ้งว่าไฟล์เสีย
 
 ## Gmail
+
+### Android Emulator
+
+รอบนี้เพิ่มการส่ง `{"client":"mobile"}` ไป connect และรับ `io.ruamport.mobile://mail/return` ผ่าน app_links ทั้งตอนเปิดแอปอยู่และ cold start โดยแยกจาก Supabase login callback ผลจากลิงก์เป็นเพียง hint ต้องเรียก `/mail/connection` ด้วย session ปัจจุบันก่อนแสดงว่าเชื่อมแล้ว ไม่ sync/import อัตโนมัติ
+
+Restart Backend แล้วรันต่อไปนี้ก่อนทดสอบ (GMAIL_REDIRECT_URI ยังเป็น callback ของ Backend localhost เดิม):
+
+```sh
+adb -s emulator-5554 reverse tcp:3000 tcp:3000
+flutter pub get
+flutter run -d emulator-5554
+```
+
+หาก adb ไม่อยู่ใน PATH ใช้ PowerShell `& "$env:LOCALAPPDATA/Android/sdk/platform-tools/adb.exe" -s emulator-5554 reverse tcp:3000 tcp:3000` ก่อน run
+
+Browser ของ Emulator ต้องเปิด `http://localhost:3000/api/v1/health` ได้ด้วย reverse port นี้ ส่วน API ของแอปยังใช้ `10.0.2.2:3000` ถ้าไม่มี reverse Google จะกลับ callback ไม่ถึงคอม แม้ API ปกติของแอปจะเรียกได้
+
+ไม่ต้องเปลี่ยน Supabase Redirect URLs หรือ GMAIL_FRONTEND_RETURN_URL เพื่อ flow เชื่อมเมลนี้ การเปลี่ยน Manifest/plugin ต้อง rebuild APK ไม่ใช่ hot reload ใน production ใช้ public HTTPS Backend callback แทน localhost และ iOS ต้องเพิ่ม URL scheme เองก่อนรองรับ platform นั้น
+
+### พฤติกรรมร่วมกับเว็บ
 
 - โหลด `GET /mail/connection` ก่อน ถ้า supported=false ให้ใช้อัปโหลด PDF ไม่มีตัวเลือก Outlook
 - การ Login ด้วย Google ไม่ได้ให้สิทธิ์อ่านเมลโดยอัตโนมัติ ต้องกดเชื่อม Gmail แยก

@@ -52,6 +52,18 @@ Username/Password ใช้ได้กับบัญชีที่ตั้�
 
 หากเปลี่ยนพอร์ต Edge ต้องเพิ่ม CORS origin ของ Backend และ Redirect URL ของ Supabase ให้ตรงด้วย Browser อาจรายงาน CORS เป็น network error ซึ่งแอปจะแสดงข้อความเชื่อมต่อไม่ได้
 
-Android Emulator ใช้ค่า API เริ่มต้น `http://10.0.2.2:3000/api/v1`; มือถือจริงต้องใช้ที่อยู่ Backend ที่เครื่องเข้าถึงได้ และต้องตั้งค่า native deep link/HTTPS ก่อนใช้งาน Social Login บนอุปกรณ์จริง รอบนี้ตรวจเส้นทางสำหรับ Edge เท่านั้น
+Android Emulator ใช้ค่า API เริ่มต้น `http://10.0.2.2:3000/api/v1`; มือถือจริงต้องใช้ที่อยู่ Backend ที่เครื่องเข้าถึงได้
+
+## Android OAuth callback
+
+AndroidManifest ลงทะเบียน `io.ruamport.mobile://auth/callback` ให้ MainActivity (`singleTop`) และปิด Flutter default deep linking เพื่อให้ Supabase/app_links รับ callback และแลก PKCE code เป็น Session ตามที่ `main.dart` รองรับอยู่แล้ว
+
+ผู้ใช้ต้องเพิ่ม `io.ruamport.mobile://auth/callback` ใน Supabase Dashboard → Authentication → URL Configuration → Redirect URLs แล้ว Save เอง โดยคง URL ของเว็บและ Site URL เดิมไว้ การแก้รอบนี้ไม่ได้เปลี่ยน Backend, การตั้งค่า Supabase หรือ flow ของเว็บ
+
+หลังเปลี่ยน Manifest ให้ Stop แล้วรัน `flutter run -d emulator-5554` ใหม่ (หรือ device id ของเครื่องที่ใช้) เพื่อ Build/ติดตั้ง APK ใหม่ Hot Reload/Hot Restart ไม่อัปเดต Manifest
+
+ตรวจการรับลิงก์ของ APK ที่ติดตั้งใหม่ได้ด้วย `adb shell cmd package resolve-activity --brief -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -p com.example.project_portfoliomanagement_mobile -d "io.ruamport.mobile://auth/callback"` ควรพบ MainActivity คำสั่งนี้ไม่ส่ง OAuth code และไม่ Login จริง
+
+callback ของ Web ยังคงเป็น `${Uri.base.origin}/auth/callback` เหมือนเดิม ไม่มีการเปลี่ยนโค้ด Dart สำหรับเปิด OAuth หรือรับ Session ในรอบนี้
 
 อ้างอิง SDK: [Supabase Flutter OAuth](https://supabase.com/docs/reference/dart/auth-signinwithoauth), [setSession](https://supabase.com/docs/reference/dart/auth-setsession)
